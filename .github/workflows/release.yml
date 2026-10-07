@@ -1,0 +1,152 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  PLUGIN_ID: tailscale-identity
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: Derive version from tag
+        run: |
+          tag="${GITHUB_REF_NAME}"
+          version="${tag#v}"
+          if ! [[ "$tag" == v* && "$version" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+            echo "::error::tag $tag must be v<dotted numeric version>, e.g. v0.2.0"
+            exit 1
+          fi
+          if ! grep -Eq "^## v${version//./\\.}( |$)" CHANGELOG.md; then
+            echo "::error::CHANGELOG.md has no '## v$version' section"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet and test
+        run: make vet test
+
+  build-linux:
+    needs: verify
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      # Builds natively inside golang:1.26-bookworm (glibc 2.36, the same
+      # Debian release as the CLIProxyAPI image), via the same Makefile
+      # target as local builds.
+      - name: Build in golang:1.26-bookworm
+        run: make build-linux-${{ matrix.arch }} VERSION=${{ needs.verify.outputs.version }}
+      - name: Check glibc floor and exports
+        run: |
+          lib="bin/linux/${{ matrix.arch }}/${PLUGIN_ID}-v${{ needs.verify.outputs.version }}.so"
+          max=$(objdump -T "$lib" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          echo "highest glibc symbol version: $max"
+          if [ "$(printf '%s\n' "$max" GLIBC_2.36 | sort -V | tail -1)" != "GLIBC_2.36" ]; then
+            echo "::error::$lib needs $max, newer than bookworm glibc 2.36"
+            exit 1
+          fi
+          nm -D --defined-only "$lib" | grep -w cliproxy_plugin_init
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lib-linux-${{ matrix.arch }}
+          path: bin/linux/${{ matrix.arch }}/*.so
+          if-no-files-found: error
+
+  build-darwin:
+    needs: verify
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      # The runner is arm64. amd64 cross-compiles with clang -arch x86_64.
+      - name: Build darwin/arm64
+        run: make build-darwin DARWIN_ARCH=arm64 VERSION=${{ needs.verify.outputs.version }}
+      - name: Build darwin/amd64
+        run: make build-darwin DARWIN_ARCH=amd64 VERSION=${{ needs.verify.outputs.version }}
+      - name: Check architectures and exports
+        run: |
+          for arch in arm64 amd64; do
+            lib="bin/darwin/$arch/${PLUGIN_ID}-v${{ needs.verify.outputs.version }}.dylib"
+            file "$lib"
+            nm -gU "$lib" | grep -w _cliproxy_plugin_init
+          done
+          lipo -archs "bin/darwin/arm64/${PLUGIN_ID}-v${{ needs.verify.outputs.version }}.dylib" | grep -qx arm64
+          lipo -archs "bin/darwin/amd64/${PLUGIN_ID}-v${{ needs.verify.outputs.version }}.dylib" | grep -qx x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lib-darwin
+          path: bin/darwin/
+          if-no-files-found: error
+
+  release:
+    needs: [verify, build-linux, build-darwin]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.verify.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: lib-linux-amd64
+          path: bin/linux/amd64
+      - uses: actions/download-artifact@v4
+        with:
+          name: lib-linux-arm64
+          path: bin/linux/arm64
+      - uses: actions/download-artifact@v4
+        with:
+          name: lib-darwin
+          path: bin/darwin
+      - name: Package zips and checksums.txt
+        run: |
+          find bin -type f | sort
+          make package VERSION="$VERSION"
+          for platform in linux_amd64 linux_arm64 darwin_arm64 darwin_amd64; do
+            test -f "dist/${PLUGIN_ID}_${VERSION}_${platform}.zip"
+          done
+          (cd dist && sha256sum -c checksums.txt)
+          for zip in dist/*.zip; do unzip -l "$zip"; done
+      - name: Extract release notes from CHANGELOG.md
+        run: |
+          awk -v tag="v$VERSION" '
+            $0 ~ "^## " tag "( |$)" { found = 1; next }
+            found && /^## / { exit }
+            found { print }
+          ' CHANGELOG.md > notes.md
+          test -s notes.md
+          cat notes.md
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/*.zip dist/checksums.txt \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file notes.md \
+            --verify-tag

@@ -1,0 +1,114 @@
+# Three ways to run CLIProxyAPI with tailscale-identity. Pick one profile:
+#   docker compose -f deploy/compose.example.yaml --profile embedded up -d
+#   docker compose -f deploy/compose.example.yaml --profile system up -d
+#   docker compose -f deploy/compose.example.yaml --profile headers up -d
+# Each profile needs its own config file. See the snippets at the end.
+
+services:
+  # Embedded: the plugin runs its own tailnet node (tsnet, userspace).
+  # Log in one time: open the URL from `docker logs cpa-embedded`, or set TS_AUTHKEY.
+  # The node state lives in ./auths/tailscale (state_dir default in the container).
+  cpa-embedded:
+    profiles: [embedded]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.example
+    container_name: cpa-embedded
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}          # optional: skip the interactive login
+    ports:
+      - "127.0.0.1:8317:8317"              # local admin access only. Tailnet traffic uses tsnet.
+    volumes:
+      - ./config.embedded.yaml:/CLIProxyAPI/config.yaml
+      - ./auths:/root/.cli-proxy-api
+    restart: unless-stopped
+
+  # System: use the tailscaled of the host. Host networking lets the plugin
+  # bind the host tailnet IP. The socket directory mount gives LocalAPI access
+  # (WhoIs). Mount the directory, not the socket file: tailscaled makes a new
+  # socket file when it restarts, and a file mount keeps the old one.
+  cpa-system:
+    profiles: [system]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.example
+    container_name: cpa-system
+    network_mode: host
+    volumes:
+      - ./config.system.yaml:/CLIProxyAPI/config.yaml
+      - ./auths:/root/.cli-proxy-api
+      - /var/run/tailscale:/var/run/tailscale
+    restart: unless-stopped
+
+  # Headers: a Tailscale sidecar terminates HTTPS with `tailscale serve` and
+  # sets Tailscale-User-Login. CLIProxyAPI shares the sidecar network namespace
+  # and listens on 127.0.0.1 only.
+  # The sidecar MUST use a kernel TUN device (TS_USERSPACE=false). In userspace
+  # mode, tailscaled forwards tailnet TCP for ports without a serve handler to
+  # 127.0.0.1. A peer can then call http://cliproxy:8317 directly and set
+  # Tailscale-User-Login to any login.
+  tailscale:
+    profiles: [headers]
+    image: tailscale/tailscale:latest
+    container_name: cpa-tailscale
+    hostname: cliproxy
+    environment:
+      TS_AUTHKEY: ${TS_AUTHKEY:-}          # optional: without it, open the login URL from `docker logs cpa-tailscale`
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_SERVE_CONFIG: /config/serve.json
+      TS_USERSPACE: "false"                # required, see above
+    cap_add: [NET_ADMIN]
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    volumes:
+      - ./tailscale-state:/var/lib/tailscale
+      - ./serve.json:/config/serve.json:ro
+    restart: unless-stopped
+
+  cpa-headers:
+    profiles: [headers]
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.example
+    container_name: cpa-headers
+    network_mode: service:tailscale
+    depends_on: [tailscale]
+    volumes:
+      - ./config.headers.yaml:/CLIProxyAPI/config.yaml
+      - ./auths:/root/.cli-proxy-api
+    restart: unless-stopped
+
+# --- config.embedded.yaml (plugin part) ---
+# server: { host: "", port: 8317, trusted-proxies: ["127.0.0.1", "::1"] }
+#   host "" is needed for the published admin port. Direct callers cannot forge
+#   identity without the per-boot secret.
+# plugins:
+#   enabled: true
+#   configs:
+#     tailscale-identity:
+#       enabled: true
+#       mode: embedded
+#       hostname: cliproxy
+#       listen_port: 8318
+#       principal_map: { "alice@github": alice }   # require_mapping defaults to true
+#
+# --- config.system.yaml ---
+# server: { host: "127.0.0.1", port: 8317, trusted-proxies: ["127.0.0.1", "::1"] }
+# plugins:
+#   enabled: true
+#   configs:
+#     tailscale-identity:
+#       enabled: true
+#       mode: system
+#       listen_port: 8318
+#       principal_map: { "alice@github": alice }
+#
+# --- config.headers.yaml ---
+# server: { host: "127.0.0.1", port: 8317 }    # loopback only: mandatory in headers mode
+# plugins:
+#   enabled: true
+#   configs:
+#     tailscale-identity:
+#       enabled: true
+#       mode: headers
+#       principal_map: { "alice@github": alice }

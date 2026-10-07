@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "tailscale-identity",
+      "name": "Tailscale Identity",
+      "description": "Authenticates CPA clients by their Tailscale identity: tailnet peers map to API principals without API keys, using tailscaled, an embedded tsnet node, or trusted Tailscale Serve headers.",
+      "author": "1fc0nfig",
+      "repository": "https://github.com/1fc0nfig/cliproxy-tailscale",
+      "homepage": "https://github.com/1fc0nfig/cliproxy-tailscale",
+      "license": "MIT",
+      "tags": ["Auth", "Tailscale", "Network", "Identity"]
+    }
+  ]
+}

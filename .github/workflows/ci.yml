@@ -1,0 +1,30 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Vet and test
+        run: make vet test
+
+  build-linux:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build linux/amd64 in golang:1.26-bookworm
+        run: make build-linux-amd64
+      - name: Check exports
+        run: nm -D --defined-only bin/linux/amd64/*.so | grep -w cliproxy_plugin_init
