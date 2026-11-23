@@ -4,7 +4,7 @@ A CLIProxyAPI (CPA) plugin that lets users on your tailnet call CPA without an A
 
 The plugin runs its own listener on the tailnet. For each request, it asks Tailscale who the caller is (WhoIs). It then maps the caller's login or tag to a CPA principal. CPA uses that principal as `userApiKey`. Usage records, session affinity, and plugins such as key-router thus see one stable identity per person. The Tailscale ACL controls who can reach the node. The plugin controls which of those callers get access, and as whom.
 
-Plugin ID: `tailscale-identity`. Current version: 0.2.0. License: MIT.
+Plugin ID: `tailscale-identity`. Current version: 0.2.1. License: MIT.
 
 ## Contents
 
@@ -58,7 +58,7 @@ The proxy streams responses without buffering (SSE) and passes WebSocket upgrade
   |---|---|---|
   | Linux | amd64, arm64 | glibc 2.34 or later. Built on Debian bookworm, the base of the CPA image. musl (Alpine) is not supported. |
   | macOS | arm64, amd64 | macOS 12 or later. |
-  | Windows | none | There is no Windows build. |
+  | Windows | amd64 | Cross-built with mingw-w64. CI loads the DLL and calls it, but no real Windows host has run it yet. |
 
 - One Tailscale source, depending on the [mode](#modes):
   - `system`: a tailscaled that runs on the same host, with read access to its LocalAPI.
@@ -92,13 +92,13 @@ The store downloads the zip for your platform from the GitHub release and verifi
 
 ### B. Manual download from GitHub Releases
 
-Each release has one zip per platform and a `checksums.txt` file. Each zip holds one file, `tailscale-identity.so` or `tailscale-identity.dylib`.
+Each release has one zip per platform and a `checksums.txt` file. Each zip holds one file: `tailscale-identity.so`, `tailscale-identity.dylib` or `tailscale-identity.dll`.
 
 1. Download the zip for your platform and `checksums.txt`:
 
    ```sh
-   V=0.2.0
-   P=linux_amd64   # linux_amd64, linux_arm64, darwin_arm64, darwin_amd64
+   V=0.2.1
+   P=linux_amd64   # linux_amd64, linux_arm64, darwin_arm64, darwin_amd64, windows_amd64
    base=https://github.com/1fc0nfig/cliproxy-tailscale/releases/download/v$V
    curl -fLO "$base/tailscale-identity_${V}_${P}.zip"
    curl -fLO "$base/checksums.txt"
@@ -204,7 +204,7 @@ While it waits, the status shows `mode: waiting`, and `last_error` gives the rea
 
 In `system` mode, the plugin checks the tailnet IPs every 30 seconds. When they change, or when a listener fails, it binds again.
 
-The process needs read access to the tailscaled LocalAPI. A normal user has read access on Linux and macOS. On macOS, the LocalAPI client first looks for the Tailscale GUI app, then for the socket. If a Mac runs two tailscaled backends (GUI app and Homebrew), set `socket` and `use_socket_only: true` to select the socket backend. The log line `tailscale-identity: mode selected` shows which node the plugin uses.
+The process needs read access to the tailscaled LocalAPI. A normal user has read access on Linux and macOS. On Windows, the LocalAPI client uses the tailscaled named pipe. On macOS, the LocalAPI client first looks for the Tailscale GUI app, then for the socket. If a Mac runs two tailscaled backends (GUI app and Homebrew), set `socket` and `use_socket_only: true` to select the socket backend. The log line `tailscale-identity: mode selected` shows which node the plugin uses.
 
 If the host runs tailscaled in userspace mode (`--tun=userspace-networking`), tailnet peers can also reach `127.0.0.1:8317` through the tailnet IP. They still need an API key there, but the CPA management API sees them as local callers. Use a kernel TUN device on hosts that run CPA.
 
@@ -471,11 +471,11 @@ CPA writes `config.yaml` in place. Saves from the management center and the plug
 - **Embedded mode.** It runs a userspace network stack in the CPA process. Expect more memory use. tsnet also reads `TS_*` variables from the process environment. The plugin sets the fields it knows, but other tsnet settings still apply.
 - **headers mode.** It cannot identify tagged nodes. It is not yet tested end to end.
 - **Not yet tested.** A tailscaled restart while CPA runs, and a tailnet IP change.
-- **Windows.** No build.
+- **Windows.** The amd64 build is not yet tested on a real host. CI only loads the DLL and makes one call.
 
 ## Building and releasing
 
-The module needs Go 1.26.6 (`tailscale.com` v1.102.5). With `GOTOOLCHAIN=auto`, an older Go downloads it. Linux builds need Docker.
+The module needs Go 1.26.6 (`tailscale.com` v1.102.5). With `GOTOOLCHAIN=auto`, an older Go downloads it. Linux and Windows builds need Docker.
 
 ```sh
 make test                  # go test -race ./internal/...
@@ -484,6 +484,7 @@ make build-darwin          # bin/darwin/<arch>/tailscale-identity-v<VERSION>.dyl
 make build-darwin DARWIN_ARCH=amd64
 make build-linux-amd64     # bin/linux/amd64/...so, built in golang:1.26-bookworm
 make build-linux-arm64
+make build-windows-amd64   # bin/windows/amd64/...dll, mingw-w64 in golang:1.26-bookworm
 make build-darwin TAGS=tsid_noembed   # system and headers mode only, smaller file
 make dist                  # darwin (native arch) + linux/arm64, then package
 make package               # zip every library in bin/ and write dist/checksums.txt
@@ -505,13 +506,14 @@ The release workflow then:
 2. runs `make vet test`.
 3. builds linux/amd64 and linux/arm64 in `golang:1.26-bookworm`, and checks that no symbol needs a glibc newer than 2.36.
 4. builds darwin/arm64 and darwin/amd64 on macOS and checks the architectures and the exported `cliproxy_plugin_init`.
-5. packages the zips, verifies `checksums.txt`, and creates the GitHub release with the changelog section as release notes.
+5. builds windows/amd64 with mingw-w64, then loads the DLL on a Windows runner and calls it once (`scripts/winsmoke`).
+6. packages the zips, verifies `checksums.txt`, and creates the GitHub release with the changelog section as release notes.
 
 ### Store asset format
 
 The CPA plugin store expects these release assets:
 
-- `tailscale-identity_<version>_<goos>_<goarch>.zip`, with exactly one library at the zip root, named `tailscale-identity.so` or `tailscale-identity.dylib`.
+- `tailscale-identity_<version>_<goos>_<goarch>.zip`, with exactly one library at the zip root, named `tailscale-identity.so`, `tailscale-identity.dylib` or `tailscale-identity.dll`.
 - `checksums.txt` in `sha256sum` format, with one line per zip.
 
 `scripts/package.sh` makes both and checks the zip layout. `registry.json` is the store entry for this repository. It holds no version: the store reads the version from the GitHub release.
