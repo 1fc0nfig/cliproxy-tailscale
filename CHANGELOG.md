@@ -2,6 +2,13 @@
 
 All notable changes to this plugin are listed here. Versions match the GitHub release tags.
 
+## v0.2.1 - 2026-11-23
+
+### Added
+
+- Release build for windows/amd64, cross-compiled with mingw-w64. The release now covers all five platforms that the CPA plugin store requires.
+- CI loads the Windows DLL on a Windows runner and calls the plugin once before a release.
+
 ## v0.2.0 - 2026-10-07
 
 First public release.

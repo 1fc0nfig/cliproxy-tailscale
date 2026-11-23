@@ -2,7 +2,7 @@ ID      := tailscale-identity
 MODULE  := github.com/1fc0nfig/cliproxy-tailscale
 # Single source of truth for the plugin version. Release CI passes
 # VERSION=<tag without v>. It must be dotted numeric (CLIProxyAPI rule).
-VERSION ?= 0.2.0
+VERSION ?= 0.2.1
 BIN     := $(CURDIR)/bin
 DIST    := $(CURDIR)/dist
 LDFLAGS := -s -w -X $(MODULE)/internal/tsid.Version=$(VERSION)
@@ -21,7 +21,7 @@ MACOS_MIN   ?= 12.0
 DARWIN_CGO  := -O2 -g -mmacosx-version-min=$(MACOS_MIN)
 
 .PHONY: all test vet check-version build-darwin build-linux-amd64 build-linux-arm64 linux-build \
-	build-linux-native dist package clean clean-dist
+	build-linux-native build-windows-amd64 build-windows-native dist package clean clean-dist
 
 all: vet test build-darwin
 
@@ -73,8 +73,29 @@ build-linux-native: check-version
 	CGO_ENABLED=1 $(GOBUILD) -o $(BIN)/linux/$$(go env GOARCH)/$(ID)-v$(VERSION).so .
 	rm -f $(BIN)/linux/$$(go env GOARCH)/*.h
 
+# Windows: cross-compiled with mingw-w64 inside the same bookworm image.
+# No --platform: the container runs the host arch, and mingw targets x86_64.
+build-windows-amd64: check-version
+	mkdir -p $(BIN)/windows/amd64 $(DOCKER_CACHE)/windows/tmp
+	docker run --rm \
+		-v $(CURDIR):/src -w /src \
+		-v cliproxy-tailscale-gomod:/go/pkg/mod \
+		-v $(DOCKER_CACHE)/windows:/cache \
+		-e GOCACHE=/cache/go-build -e GOTMPDIR=/cache/tmp \
+		-e GOTOOLCHAIN=auto \
+		$(GO_IMAGE) \
+		sh -c 'apt-get update -qq && apt-get install -y -qq --no-install-recommends gcc-mingw-w64-x86-64 >/dev/null && \
+			make build-windows-native VERSION=$(VERSION) TAGS="$(TAGS)"'
+
+# Runs inside the golang bookworm container (see build-windows-amd64).
+build-windows-native: check-version
+	mkdir -p $(BIN)/windows/amd64
+	CGO_ENABLED=1 GOOS=windows GOARCH=amd64 CC=x86_64-w64-mingw32-gcc $(GOBUILD) \
+		-o $(BIN)/windows/amd64/$(ID)-v$(VERSION).dll .
+	rm -f $(BIN)/windows/amd64/*.h
+
 # Local release equivalent: darwin (native arch) + linux/arm64 via docker.
-# CI builds all four platforms; see .github/workflows/release.yml.
+# CI builds all five platforms; see .github/workflows/release.yml.
 dist: clean-dist build-darwin build-linux-arm64 package
 
 # Zips every library under bin/ for VERSION and writes dist/checksums.txt.

@@ -28,3 +28,35 @@ jobs:
         run: make build-linux-amd64
       - name: Check exports
         run: nm -D --defined-only bin/linux/amd64/*.so | grep -w cliproxy_plugin_init
+
+  build-windows:
+    needs: test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      # Cross-compiles with mingw-w64 inside golang:1.26-bookworm, via the
+      # same Makefile target as local builds.
+      - name: Build windows/amd64
+        run: make build-windows-amd64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lib-windows-amd64
+          path: bin/windows/amd64/*.dll
+          if-no-files-found: error
+
+  smoke-windows:
+    needs: build-windows
+    runs-on: windows-2025
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/download-artifact@v4
+        with:
+          name: lib-windows-amd64
+          path: dll
+      # Loads the DLL like the CLIProxyAPI Windows loader and calls it once.
+      - name: Load the DLL and call the plugin
+        shell: bash
+        run: go run ./scripts/winsmoke dll/*.dll
